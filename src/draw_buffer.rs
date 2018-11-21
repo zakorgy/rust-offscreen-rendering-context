@@ -3,12 +3,11 @@ use gleam::gl;
 use gleam::gl::types::{GLuint, GLenum, GLint};
 #[cfg(target_os="macos")]
 use io_surface::{IOSurface, IOSurfaceID};
-use std::rc::Rc;
 use std::mem;
+use std::rc::Rc;
 
 use crate::GLContext;
 use crate::NativeGLContextMethods;
-
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub enum ColorAttachmentType {
@@ -29,6 +28,38 @@ const SURFACE_COUNT: usize = 3;
 #[cfg(target_os="macos")]
 const BYTES_PER_PIXEL: i32 = 4;
 
+pub enum TextureBacking {
+    #[cfg(target_os="macos")]
+    IOSurface(GLuint, IOSurfaceID),
+    Texture(GLuint),
+}
+
+impl TextureBacking {
+    fn attach_to_framebuffer(&self, gl: &dyn gl::Gl) {
+        match *self {
+            #[cfg(target_os="macos")]
+            TextureBacking::IOSurface(_, active_surface_id) => {
+                gl.framebuffer_texture_2d(
+                    gl::FRAMEBUFFER,
+                    gl::COLOR_ATTACHMENT0,
+                    gl::TEXTURE_RECTANGLE_ARB,
+                    active_surface_id,
+                    0
+                );
+            }
+            TextureBacking::Texture(active_texture_id) => {
+                gl.framebuffer_texture_2d(
+                    gl::FRAMEBUFFER,
+                    gl::COLOR_ATTACHMENT0,
+                    gl::TEXTURE_2D,
+                    active_texture_id,
+                    0
+                );
+            }
+        }
+    }
+}
+
 /// We either have a color renderbuffer, or a surface bound to a texture bound
 /// to a framebuffer as a color attachment.
 ///
@@ -37,7 +68,7 @@ const BYTES_PER_PIXEL: i32 = 4;
 #[derive(Debug)]
 pub enum ColorAttachment {
     Renderbuffer(GLuint),
-    Texture(GLuint),
+    Texture(GLuint, GLuint),
     #[cfg(target_os="macos")]
     IOSurface {
         surfaces: [(GLuint, IOSurfaceID); SURFACE_COUNT],
@@ -51,7 +82,7 @@ impl ColorAttachment {
     pub fn color_attachment_type(&self) -> ColorAttachmentType {
         match *self {
             ColorAttachment::Renderbuffer(_) => ColorAttachmentType::Renderbuffer,
-            ColorAttachment::Texture(_) => ColorAttachmentType::Texture,
+            ColorAttachment::Texture(_, _) => ColorAttachmentType::Texture,
             #[cfg(target_os="macos")]
             ColorAttachment::IOSurface{..} => ColorAttachmentType::IOSurface,
         }
@@ -60,7 +91,7 @@ impl ColorAttachment {
     fn destroy(self, gl: &dyn gl::Gl) {
         match self {
             ColorAttachment::Renderbuffer(id) => gl.delete_renderbuffers(&[id]),
-            ColorAttachment::Texture(tex_id) => gl.delete_textures(&[tex_id]),
+            ColorAttachment::Texture(tex1, tex2) => gl.delete_textures(&[tex1, tex2]),
             #[cfg(target_os="macos")]
             ColorAttachment::IOSurface{ surfaces, .. } => {
                 for (text, _) in surfaces.iter() {
@@ -71,24 +102,25 @@ impl ColorAttachment {
         }
     }
 
-    #[cfg(target_os="macos")]
-    fn active_texture(&self) -> GLuint {
+    fn active_texture(&self) -> TextureBacking {
         match *self {
             ColorAttachment::Renderbuffer(_) => panic!("no texture for renderbuffer attachment"),
-            ColorAttachment::Texture(active) => active,
+            ColorAttachment::Texture(active, _) => TextureBacking::Texture(active),
+            #[cfg(target_os="macos")]
             ColorAttachment::IOSurface{ surfaces, wr_visible: _, complete: _, active } => {
-                surfaces[active].0
+                TextureBacking::IOSurface(surfaces[active].0, surfaces[active].1)
             }
         }
     }
 
-    #[cfg(target_os="macos")]
-    fn complete_surface(&self) -> Option<IOSurfaceID> {
+    fn complete_texture(&self) -> TextureBacking {
         match *self {
+            ColorAttachment::Renderbuffer(_) => panic!("no texture for renderbuffer attachment"),
+            ColorAttachment::Texture(_, complete) => TextureBacking::Texture(complete),
+            #[cfg(target_os="macos")]
             ColorAttachment::IOSurface{ surfaces, wr_visible: _, complete, active: _ } => {
-                Some(surfaces[complete].1)
+                TextureBacking::IOSurface(surfaces[complete].0, surfaces[complete].1)
             }
-            _ => None,
         }
     }
 
@@ -102,9 +134,11 @@ impl ColorAttachment {
         }
     }
 
-    #[cfg(target_os="macos")]
     fn swap_active_texture(&mut self) {
         match *self {
+            ColorAttachment::Texture(ref mut active, ref mut complete) =>
+                mem::swap(active, complete),
+            #[cfg(target_os="macos")]
             ColorAttachment::IOSurface{ surfaces: _, wr_visible: _, ref mut complete, ref mut active } => {
                 mem::swap(complete, active);
             }
@@ -233,12 +267,23 @@ impl DrawBuffer {
         }
     }
 
-    pub fn get_bound_texture_id(&self) -> Option<GLuint> {
+    pub fn get_complete_texture_id(&self) -> Option<GLuint> {
         match self.color_attachment.as_ref().unwrap() {
             &ColorAttachment::Renderbuffer(_) => None,
-            &ColorAttachment::Texture(id) => Some(id),
+            &ColorAttachment::Texture(_active, complete) => Some(complete),
             #[cfg(target_os="macos")]
             &ColorAttachment::IOSurface{ surfaces, wr_visible: _, complete: _, active } => {
+                Some(surfaces[active].0)
+            }
+        }
+    }
+
+    pub fn get_active_texture_id(&self) -> Option<GLuint> {
+        match self.color_attachment.as_ref().unwrap() {
+            &ColorAttachment::Renderbuffer(_) => None,
+            &ColorAttachment::Texture(active, _complete) => Some(active),
+            #[cfg(target_os="macos")]
+            &ColorAttachment::IOSurface { surfaces, wr_visible: _, complete: _, active } => {
                 Some(surfaces[active].0)
             }
         }
@@ -248,7 +293,7 @@ impl DrawBuffer {
     pub fn get_active_io_surface_id(&self) -> Option<IOSurfaceID> {
         match self.color_attachment.as_ref().unwrap() {
             &ColorAttachment::Renderbuffer(_) => None,
-            &ColorAttachment::Texture(_) => None,
+            &ColorAttachment::Texture(..) => None,
             &ColorAttachment::IOSurface{ surfaces, wr_visible: _, complete: _, active } => {
                 Some(surfaces[active].1)
             }
@@ -280,35 +325,49 @@ impl DrawBuffer {
 
             // TODO(ecoal95): Allow more customization of textures
             ColorAttachmentType::Texture => {
-                let texture = self.gl().gen_textures(1)[0];
-                debug_assert!(texture != 0);
+                let create_texture = || {
+                    let texture = self.gl().gen_textures(1)[0];
+                    debug_assert!(texture != 0);
 
-                self.gl().bind_texture(gl::TEXTURE_2D, texture);
-                self.gl().tex_image_2d(
-                    gl::TEXTURE_2D,
-                    0,
-                    formats.texture_internal as GLint,
-                    self.size.width,
-                    self.size.height,
-                    0,
-                    formats.texture,
-                    formats.texture_type,
-                    None
-                );
+                    self.gl().bind_texture(gl::TEXTURE_2D, texture);
 
-                // Low filtering to allow rendering
-                self.gl().tex_parameter_i(gl::TEXTURE_2D, gl::TEXTURE_MAG_FILTER, gl::NEAREST as GLint);
-                self.gl().tex_parameter_i(gl::TEXTURE_2D, gl::TEXTURE_MIN_FILTER, gl::NEAREST as GLint);
+                    debug_assert_eq!(self.gl().get_error(), gl::NO_ERROR);
 
-                // TODO(emilio): Check if these two are neccessary, probably not
-                self.gl().tex_parameter_i(gl::TEXTURE_2D, gl::TEXTURE_WRAP_S, gl::CLAMP_TO_EDGE as GLint);
-                self.gl().tex_parameter_i(gl::TEXTURE_2D, gl::TEXTURE_WRAP_T, gl::CLAMP_TO_EDGE as GLint);
+                    self.gl().tex_image_2d(
+                        gl::TEXTURE_2D,
+                        0,
+                        formats.texture_internal as GLint,
+                        self.size.width,
+                        self.size.height,
+                        0,
+                        formats.texture,
+                        formats.texture_type,
+                        None);
 
-                self.gl().bind_texture(gl::TEXTURE_2D, 0);
+                    debug_assert_eq!(self.gl().get_error(), gl::NO_ERROR);
 
-                debug_assert_eq!(self.gl().get_error(), gl::NO_ERROR);
+                    // Low filtering to allow rendering
+                    self.gl().tex_parameter_i(gl::TEXTURE_2D, gl::TEXTURE_MAG_FILTER, gl::NEAREST as GLint);
+                    self.gl().tex_parameter_i(gl::TEXTURE_2D, gl::TEXTURE_MIN_FILTER, gl::NEAREST as GLint);
 
-                Some(ColorAttachment::Texture(texture))
+                    debug_assert_eq!(self.gl().get_error(), gl::NO_ERROR);
+
+                    // TODO(emilio): Check if these two are neccessary, probably not
+                    self.gl().tex_parameter_i(gl::TEXTURE_2D, gl::TEXTURE_WRAP_S, gl::CLAMP_TO_EDGE as GLint);
+                    self.gl().tex_parameter_i(gl::TEXTURE_2D, gl::TEXTURE_WRAP_T, gl::CLAMP_TO_EDGE as GLint);
+
+                    debug_assert_eq!(self.gl().get_error(), gl::NO_ERROR);
+
+                    self.gl().bind_texture(gl::TEXTURE_2D, 0);
+
+                    debug_assert_eq!(self.gl().get_error(), gl::NO_ERROR);
+                    texture
+                };
+
+                let active = create_texture();
+                let complete = create_texture();
+
+                Some(ColorAttachment::Texture(active, complete))
             },
             #[cfg(target_os="macos")]
             ColorAttachmentType::IOSurface => {
@@ -400,28 +459,20 @@ impl DrawBuffer {
 
     /// Swap the internal read and draw textures, returning the id of the texture
     /// now used for reading.
-    #[cfg(target_os="macos")]
-    pub fn swap_framebuffer_texture(&mut self) -> Option<IOSurfaceID> {
-        self.gl().finish();
-        let (active_texture_id, complete_surface_id) = match self.color_attachment {
+    pub fn swap_framebuffer_texture(&mut self) -> Option<TextureBacking> {
+        let (active_texture_id, complete_texture_id) = match self.color_attachment {
             Some(ref mut attachment) => {
                 attachment.swap_active_texture();
                 (
                     attachment.active_texture(),
-                    attachment.complete_surface(),
+                    attachment.complete_texture(),
                 )
             }
             None => return None,
         };
         self.gl().bind_framebuffer(gl::FRAMEBUFFER, self.framebuffer);
-        self.gl().framebuffer_texture_2d(
-            gl::FRAMEBUFFER,
-            gl::COLOR_ATTACHMENT0,
-            gl::TEXTURE_RECTANGLE_ARB,
-            active_texture_id,
-            0
-        );
-        complete_surface_id
+        active_texture_id.attach_to_framebuffer(&*self.gl());
+        Some(complete_texture_id)
     }
 
     /// Swap the WR visible and complete texture, returning the id of
@@ -450,7 +501,7 @@ impl DrawBuffer {
                                                   color_renderbuffer);
                 debug_assert_eq!(self.gl().is_renderbuffer(color_renderbuffer), gl::TRUE);
             },
-            ColorAttachment::Texture(texture_id) => {
+            ColorAttachment::Texture(texture_id, _) => {
                 self.gl().framebuffer_texture_2d(gl::FRAMEBUFFER,
                                                 gl::COLOR_ATTACHMENT0,
                                                 gl::TEXTURE_2D,

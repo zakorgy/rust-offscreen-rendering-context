@@ -10,6 +10,7 @@ use crate::GLFormats;
 use crate::GLLimits;
 use crate::DrawBuffer;
 use crate::ColorAttachmentType;
+use crate::TextureBacking;
 
 /// This is a wrapper over a native headless GL context
 pub struct GLContext<Native> {
@@ -189,21 +190,20 @@ impl<Native> GLContext<Native>
     }
 
     /// Swap the backing textures for the draw buffer, returning the id of
-    /// the IOSurface now used for reading. Resets the new active texture to an
+    /// the texture now used for reading. Resets the new active texture to an
     /// appropriate initial state;
-    #[cfg(target_os="macos")]
     pub fn swap_draw_buffer(
         &mut self,
         clear_color: (f32, f32, f32, f32),
         mask: u32,
-    ) -> Option<u32> {
-        let surface_id = match self.draw_buffer {
+    ) -> Option<TextureBacking> {
+        let texture_id = match self.draw_buffer {
             Some(ref mut db) => db.swap_framebuffer_texture(),
             None => return None,
         };
         // TODO: support preserveDrawBuffer instead of clearing new frame
         self.reset_draw_buffer_contents(Some(clear_color), Some(mask));
-        surface_id
+        texture_id
     }
 
     /// Swap the WR visible and complete texture, returning the id of

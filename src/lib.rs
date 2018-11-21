@@ -21,7 +21,7 @@ mod gl_context;
 pub use gl_context::{GLContext, GLContextDispatcher, GLVersion};
 
 mod draw_buffer;
-pub use draw_buffer::{DrawBuffer, ColorAttachmentType};
+pub use draw_buffer::{DrawBuffer, ColorAttachmentType, TextureBacking};
 
 mod gl_context_attributes;
 pub use gl_context_attributes::GLContextAttributes;
