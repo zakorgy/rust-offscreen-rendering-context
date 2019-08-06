@@ -206,15 +206,12 @@ impl<Native> GLContext<Native>
         texture_id
     }
 
-    /// Swap the WR visible and complete texture, returning the id of
-    /// the IOSurface which we will send to the WR thread
-    #[cfg(target_os="macos")]
-    pub fn handle_lock(&mut self) -> Option<u32> {
-        let surface_id = match self.draw_buffer {
+    /// Swap the WR visible and complete texture, returning the WR visable TextureBacking struct
+    pub fn handle_lock(&mut self) -> Option<TextureBacking> {
+        match self.draw_buffer {
             Some(ref mut db) => db.swap_wr_visible_texture(),
-            None => return None,
-        };
-        surface_id
+            None => None,
+        }
     }
 
     pub fn borrow_draw_buffer(&self) -> Option<&DrawBuffer> {

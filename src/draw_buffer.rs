@@ -3,6 +3,8 @@ use gleam::gl;
 use gleam::gl::types::{GLuint, GLenum, GLint};
 #[cfg(target_os="macos")]
 use io_surface::{IOSurface, IOSurfaceID};
+#[cfg(feature = "serde")]
+use serde::{Deserialize, Serialize};
 use std::mem;
 use std::rc::Rc;
 
@@ -28,6 +30,8 @@ const SURFACE_COUNT: usize = 3;
 #[cfg(target_os="macos")]
 const BYTES_PER_PIXEL: i32 = 4;
 
+#[cfg_attr(feature = "serde", derive(Deserialize, Serialize))]
+#[derive(Debug, Copy, Clone)]
 pub enum TextureBacking {
     #[cfg(target_os="macos")]
     IOSurface(GLuint, IOSurfaceID),
@@ -38,12 +42,12 @@ impl TextureBacking {
     fn attach_to_framebuffer(&self, gl: &dyn gl::Gl) {
         match *self {
             #[cfg(target_os="macos")]
-            TextureBacking::IOSurface(_, active_surface_id) => {
+            TextureBacking::IOSurface(active_texture_id, _) => {
                 gl.framebuffer_texture_2d(
                     gl::FRAMEBUFFER,
                     gl::COLOR_ATTACHMENT0,
                     gl::TEXTURE_RECTANGLE_ARB,
-                    active_surface_id,
+                    active_texture_id,
                     0
                 );
             }
@@ -56,6 +60,13 @@ impl TextureBacking {
                     0
                 );
             }
+        }
+    }
+
+    pub fn texture_id(&self) -> GLuint {
+        match *self {
+            TextureBacking::IOSurface(id, _) => id,
+            TextureBacking::Texture(id) => id,
         }
     }
 }
@@ -124,13 +135,14 @@ impl ColorAttachment {
         }
     }
 
-    #[cfg(target_os="macos")]
-    fn wr_visible_surface(&self) -> Option<IOSurfaceID> {
+    fn wr_visible_texture(&self) -> TextureBacking {
         match *self {
+            ColorAttachment::Renderbuffer(_) => panic!("no texture for renderbuffer attachment"),
+            ColorAttachment::Texture(_, complete) => TextureBacking::Texture(complete),
+            #[cfg(target_os="macos")]
             ColorAttachment::IOSurface{ surfaces, wr_visible, complete: _, active: _ } => {
-                Some(surfaces[wr_visible].1)
+                TextureBacking::IOSurface(surfaces[wr_visible].0, surfaces[wr_visible].1)
             }
-            _ => None,
         }
     }
 
@@ -267,37 +279,12 @@ impl DrawBuffer {
         }
     }
 
-    pub fn get_complete_texture_id(&self) -> Option<GLuint> {
-        match self.color_attachment.as_ref().unwrap() {
-            &ColorAttachment::Renderbuffer(_) => None,
-            &ColorAttachment::Texture(_active, complete) => Some(complete),
-            #[cfg(target_os="macos")]
-            &ColorAttachment::IOSurface{ surfaces, wr_visible: _, complete: _, active } => {
-                Some(surfaces[active].0)
-            }
-        }
+    pub fn get_complete_texture(&self) -> Option<TextureBacking> {
+        self.color_attachment.as_ref().map(|a| a.complete_texture())
     }
 
-    pub fn get_active_texture_id(&self) -> Option<GLuint> {
-        match self.color_attachment.as_ref().unwrap() {
-            &ColorAttachment::Renderbuffer(_) => None,
-            &ColorAttachment::Texture(active, _complete) => Some(active),
-            #[cfg(target_os="macos")]
-            &ColorAttachment::IOSurface { surfaces, wr_visible: _, complete: _, active } => {
-                Some(surfaces[active].0)
-            }
-        }
-    }
-
-    #[cfg(target_os="macos")]
-    pub fn get_active_io_surface_id(&self) -> Option<IOSurfaceID> {
-        match self.color_attachment.as_ref().unwrap() {
-            &ColorAttachment::Renderbuffer(_) => None,
-            &ColorAttachment::Texture(..) => None,
-            &ColorAttachment::IOSurface{ surfaces, wr_visible: _, complete: _, active } => {
-                Some(surfaces[active].1)
-            }
-        }
+    pub fn get_active_texture(&self) -> Option<TextureBacking> {
+        self.color_attachment.as_ref().map(|a| a.active_texture())
     }
 
     fn gl(&self) -> &dyn gl::Gl {
@@ -477,15 +464,11 @@ impl DrawBuffer {
 
     /// Swap the WR visible and complete texture, returning the id of
     /// the IOSurface which we will send to the WR thread
-    #[cfg(target_os="macos")]
-    pub fn swap_wr_visible_texture(&mut self) -> Option<IOSurfaceID> {
-        match self.color_attachment {
-            Some(ref mut attachment) => {
-                attachment.swap_wr_visible_texture();
-                attachment.wr_visible_surface()
-            }
-            None => None,
-        }
+    pub fn swap_wr_visible_texture(&mut self) -> Option<TextureBacking> {
+        self.color_attachment.as_mut().map(|ref mut attachment| {
+            attachment.swap_wr_visible_texture();
+            attachment.wr_visible_texture()
+        })
     }
 
     fn attach_to_framebuffer(&mut self) -> Result<(), &'static str> {
